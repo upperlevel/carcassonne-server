@@ -12,7 +12,6 @@ mod api_service;
 mod client_ws;
 mod protocol;
 mod server_actor;
-mod room_db_async;
 
 async fn index() -> impl Responder {
     HttpResponse::Ok().body("Hello world!")
