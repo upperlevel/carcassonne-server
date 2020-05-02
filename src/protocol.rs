@@ -17,7 +17,8 @@ pub struct PlayerObject {
     #[serde(skip_deserializing)]
     pub id: SerId,
     pub username: String,
-    pub avatar: String,
+    pub avatar: u32,
+    pub color: u64,
     #[serde(skip_deserializing)]
     pub is_host: bool,
 }
