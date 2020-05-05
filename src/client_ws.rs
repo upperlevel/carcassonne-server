@@ -121,7 +121,7 @@ impl ClientWs {
                         },
                     }
                     let res = Response::ok(
-                        id, "login_response",
+                        id, "login_response".into(),
                         LoginResponse {
                             player_id: act.session_id.into(),
                         }
@@ -132,7 +132,7 @@ impl ClientWs {
                 })
                 .wait(ctx);
         } else {
-            self.send_message(ctx, &protocol::Error::from_origin(id, "Login Required".to_string(), None));
+            self.send_message(ctx, &protocol::Error::from_origin(id, "Login Required".into(), None));
         }
     }
 
@@ -153,7 +153,7 @@ impl ClientWs {
                             },
                         };
                         let pkt = Response::ok(
-                            id, "room_create_response",
+                            id, "room_create_response".into(),
                             RoomCreateResponse {
                                 players: [res.player],
                                 invite_id: res.room_id.into(),
@@ -168,7 +168,7 @@ impl ClientWs {
                 self.db.do_send(server_actor::LeaveRoom {
                     id: self.session_id
                 });
-                self.send_message(ctx, &Response::ok(id, "room_leave_response", NoData {}));
+                self.send_message(ctx, &Response::ok(id, "room_leave_response".into(), NoData {}));
             },
             ReceivedMessage::RoomJoin { invite_id } => {
                 self.db.send(server_actor::JoinRoom {
@@ -185,7 +185,7 @@ impl ClientWs {
                                 return fut::ready(());
                             },
                         };
-                        let ptype = "room_join_response";
+                        let ptype = "room_join_response".into();
                         match res {
                             JoinRoomResult::Success(players) => {
                                 let pkt = Response::ok(
@@ -196,19 +196,19 @@ impl ClientWs {
                             }
                             JoinRoomResult::RoomNotFound => {
                                 let pkt = Response::from(
-                                    id, ptype, Some("room_not_found".to_string()), NoData {}
+                                    id, ptype, Some("room_not_found".into()), NoData {}
                                 );
                                 act.send_message(ctx, &pkt);
                             },
                             JoinRoomResult::NameConflict => {
                                 let pkt = Response::from(
-                                    id, ptype, Some("name_conflict".to_string()), NoData {}
+                                    id, ptype, Some("name_conflict".into()), NoData {}
                                 );
                                 act.send_message(ctx, &pkt);
                             },
                             JoinRoomResult::AlreadyPlaying => {
                                 let pkt = Response::from(
-                                    id, ptype, Some("already_playing".to_string()), NoData {}
+                                    id, ptype, Some("already_playing".into()), NoData {}
                                 );
                                 act.send_message(ctx, &pkt);
                             },
@@ -231,14 +231,14 @@ impl ClientWs {
                             ctx.text(x.data);
                         }
                     } else {
-                        self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid request_id".to_string(), None));
+                        self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid request_id".into(), None));
                     }
                 } else {
-                    self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid state".to_string(), Some("No message to acknowledge".to_string())));
+                    self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid state".into(), Some("No message to acknowledge".into())));
                 }
             },
             _ => {
-                self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid message type".to_string(), None));
+                self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid message type".into(), None));
             }
         }
     }
@@ -337,7 +337,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientWs {
         let id_message = match serde_json::from_str::<IdMessage>(&text) {
             Ok(x) => x,
             Err(_) => {
-                let err = protocol::Error::from("Invalid Json".to_string(), None);
+                let err = protocol::Error::from("Invalid Json".into(), None);
                 self.send_message(ctx, &err);
                 return
             },
@@ -345,7 +345,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientWs {
 
         let id = match id_message.id {
             None => {
-                let err = protocol::Error::from("Id missing".to_string(), None);
+                let err = protocol::Error::from("Id missing".into(), None);
                 self.send_message(ctx, &err);
                 return
             },
@@ -355,7 +355,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientWs {
         let mex = match serde_json::from_str::<ReceivedMessage>(&text) {
             Ok(x) => x,
             Err(x) => {
-                let err = protocol::Error::from_origin(id, "Invalid Json".to_string(), Some(x.to_string()));
+                let err = protocol::Error::from_origin(id, "Invalid Json".into(), Some(x.to_string().into()));
                 self.send_message(ctx, &err);
                 return;
             }

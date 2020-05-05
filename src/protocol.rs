@@ -6,6 +6,7 @@ use serde::{Deserializer, Serializer};
 use serde::de;
 use serde::de::Visitor;
 use serde::export::Formatter;
+use std::borrow::Cow;
 
 pub type IdType = usize;
 
@@ -73,27 +74,27 @@ pub struct OutMessage<T: Serialize> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Response<'a, T: Serialize> {
+pub struct Response<'a, 'b, T: Serialize> {
     #[serde(rename = "type")]
-    pub ptype: &'a str,
+    pub ptype: Cow<'a, str>,
     pub request_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    pub result: Option<Cow<'b, str>>,
     #[serde(flatten)]
     pub data: T,
 }
 
-impl<'a, T: Serialize> Response<'a, T> {
-    pub fn ok(req_id: u64, ptype: &'a str, data: T) -> Self {
+impl<'a, 'b, T: Serialize> Response<'a, 'b, T> {
+    pub fn ok(req_id: u64, ptype: Cow<'a, str>, data: T) -> Self {
         Response {
             ptype,
             request_id: req_id,
-            result: Some("ok".to_string()),
+            result: Some(Cow::Borrowed("ok")),
             data
         }
     }
 
-    pub fn from(request_id: u64, ptype: &'a str, result: Option<String>, data: T) -> Self {
+    pub fn from(request_id: u64, ptype: Cow<'a, str>, result: Option<Cow<'b, str>>, data: T) -> Self {
         Response {
             ptype, request_id, result, data
         }
@@ -142,18 +143,18 @@ pub struct RoomJoinResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Error {
+pub struct Error<'a, 'b> {
     #[serde(rename = "type")]
     pub mtype: &'static str,// always "error"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_id: Option<u64>,
-    pub error: String,
+    pub error: Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
+    pub error_message: Option<Cow<'b, str>>,
 }
 
-impl Error {
-    pub fn from_origin(origin_id: u64, error: String, error_message: Option<String>) -> Error {
+impl <'a, 'b> Error<'a, 'b> {
+    pub fn from_origin(origin_id: u64, error: Cow<'a, str>, error_message: Option<Cow<'b, str>>) -> Self {
         Error {
             mtype: "error",
             origin_id: Some(origin_id),
@@ -162,7 +163,7 @@ impl Error {
         }
     }
 
-    pub fn from(error: String, error_message: Option<String>) -> Self {
+    pub fn from(error: Cow<'a, str>, error_message: Option<Cow<'b, str>>) -> Self {
         Error {
             mtype: "error",
             origin_id: None,
