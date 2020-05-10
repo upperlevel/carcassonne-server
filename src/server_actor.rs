@@ -15,7 +15,7 @@ use actix::dev::{MessageResponse, ResponseChannel};
 use rand::{self, rngs::ThreadRng, Rng};
 use std::collections::{HashMap, HashSet};
 
-use crate::protocol::{OutEvent, IdType, PlayerObject, RoomConnectionType, SerId};
+use crate::protocol::{OutEvent, IdType, PlayerObject, RoomConnectionType, SerId, LoginData, PlayerCosmetics};
 use crate::client_ws::ClientWs;
 
 
@@ -45,14 +45,22 @@ pub struct Event(pub OutEvent);
 #[derive(Message)]
 #[rtype(IdType)]
 pub struct RegisterSession {
+    pub id: Option<IdType>,
     pub addr: Addr<ClientWs>,
-    pub obj: PlayerObject,
+    pub obj: LoginData,
 }
 
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct Disconnect {
     pub id: IdType,
+}
+
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct EditCosmetics {
+    pub id: IdType,
+    pub obj: PlayerCosmetics,
 }
 
 #[derive(Message)]
@@ -244,11 +252,30 @@ impl Handler<RegisterSession> for ServerActor {
     type Result = IdType;
 
     fn handle(&mut self, msg: RegisterSession, _: &mut Context<Self>) -> Self::Result {
-        self.allocate_player_id(UserData {
-            addr: msg.addr,
-            obj: msg.obj,
-            room: None,
-        })
+        match msg.id {
+            Some(id) => {
+                let player = self.players.get_mut(&id).expect("Invalid player");
+                if player.room.is_none() {
+                    player.obj.username = msg.obj.username;
+                    player.obj.cosmetics = msg.obj.cosmetics;
+                }
+                id
+            },
+            None => {
+                let pobj = PlayerObject {
+                    id: 0.into(),
+                    username: msg.obj.username,
+                    cosmetics: msg.obj.cosmetics,
+                    is_host: false
+                };
+                self.allocate_player_id(UserData {
+                    addr: msg.addr,
+                    obj: pobj,
+                    room: None,
+                })
+            }
+        }
+
     }
 }
 
@@ -318,6 +345,31 @@ impl Handler<JoinRoom> for ServerActor {
             .map(|x| self.players.get(x).expect("Cannot find player").obj.clone())
             .collect();
         JoinRoomResult::Success(users)
+    }
+}
+
+impl Handler<EditCosmetics> for ServerActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: EditCosmetics, _: &mut Context<Self>) -> Self::Result {
+        let player = self.players.get_mut(&msg.id).expect("Invalid player");
+
+        if player.obj.cosmetics == msg.obj {
+            return;
+        }
+        player.obj.cosmetics = msg.obj.clone();
+
+        let room = match player.room {
+            Some(x) => x,
+            None => return,
+        };
+
+        let id = player.obj.id;
+
+        self.broadcast_event(room, OutEvent::EventPlayerAvatarChange {
+            player: id.into(),
+            cosmetics: msg.obj,
+        }, Some(msg.id));
     }
 }
 

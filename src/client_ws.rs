@@ -17,10 +17,11 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_QUEUE_MAX_SIZE: usize = 64usize;
 
 pub enum ClientState {
-    PreLogin,
-    MatchMaking,
-    PrePlaying(u64),
-    Playing
+    PreLogin,// What's your name sir?
+    MatchMaking,// Join or Create room (can also re-login to change name)
+    Lobby,// You're in a room, prepare for battle (can also change cosmetics).
+    PrePlaying(u64),// The game is started but the client hasn't acknowledged it yet.
+    Playing// Playing.
 }
 
 pub struct ClientWs {
@@ -107,6 +108,7 @@ impl ClientWs {
     pub fn handle_message_login(&mut self, ctx: &mut <Self as Actor>::Context, id: u64, mex: ReceivedMessage) {
         if let ReceivedMessage::Login { details } = mex {
             self.db.send(server_actor::RegisterSession {
+                id: None,
                 addr: ctx.address(),
                 obj: details,
             })
@@ -138,12 +140,39 @@ impl ClientWs {
 
     pub fn handle_message_matchmaking(&mut self, ctx: &mut <Self as Actor>::Context, id: u64, mex: ReceivedMessage) {
         match mex {
+            ReceivedMessage::Login { details } => {
+                self.db.send(server_actor::RegisterSession {
+                    id: Some(self.session_id),
+                    addr: ctx.address(),
+                    obj: details,
+                })
+                    .into_actor(self)
+                    .then(move |res, act, ctx| {
+                        match res {
+                            Ok(_) => {},
+                            _ => {
+                                // something is wrong with chat server
+                                ctx.stop();
+                                return fut::ready(());
+                            },
+                        }
+                        let res = Response::ok(
+                            id, "login_response".into(),
+                            LoginResponse {
+                                player_id: act.session_id.into(),
+                            }
+                        );
+                        act.send_message(ctx, &res);
+                        fut::ready(())
+                    })
+                    .wait(ctx);
+            }
             ReceivedMessage::RoomCreate {} => {
                 self.db.send(server_actor::CreateRoom {
                     id: self.session_id
                 })
                     .into_actor(self)
-                    .then(move |res, act, ctx|{
+                    .then(move |res, act, ctx| {
                         let res = match res {
                             Ok(res) => res,
                             _ => {
@@ -160,15 +189,10 @@ impl ClientWs {
                             }
                         );
                         act.send_message(ctx, &pkt);
+                        act.state = ClientState::Lobby;
 
                         fut::ready(())
                     }).wait(ctx);
-            },
-            ReceivedMessage::RoomLeave {} => {
-                self.db.do_send(server_actor::LeaveRoom {
-                    id: self.session_id
-                });
-                self.send_message(ctx, &Response::ok(id, "room_leave_response".into(), NoData {}));
             },
             ReceivedMessage::RoomJoin { invite_id } => {
                 self.db.send(server_actor::JoinRoom {
@@ -193,6 +217,7 @@ impl ClientWs {
                                     RoomJoinResponse { players }
                                 );
                                 act.send_message(ctx, &pkt);
+                                act.state = ClientState::Lobby;
                             }
                             JoinRoomResult::RoomNotFound => {
                                 let pkt = Response::from(
@@ -216,6 +241,29 @@ impl ClientWs {
                         fut::ready(())
                     })
                     .wait(ctx);
+            },
+            _ => {
+                self.send_message(ctx, &protocol::Error::from_origin(id, "Invalid message type".into(), None));
+            }
+        }
+    }
+
+    pub fn handle_message_lobby(&mut self, ctx: &mut <Self as Actor>::Context, id: u64, mex: ReceivedMessage) {
+        self.send_message(ctx, &protocol::Error::from_origin(id, "Login Required".into(), None));
+
+        match mex {
+            ReceivedMessage::ChangeAvatar { cosmetics } => {
+                self.db.do_send(server_actor::EditCosmetics {
+                    id: self.session_id,
+                    obj: cosmetics,
+                })
+            },
+            ReceivedMessage::RoomLeave {} => {
+                self.db.do_send(server_actor::LeaveRoom {
+                    id: self.session_id
+                });
+                self.state = ClientState::MatchMaking;
+                self.send_message(ctx, &Response::ok(id, "room_leave_response".into(), NoData {}));
             },
             ReceivedMessage::RoomStart { connection_type } => {
                 self.db.do_send(server_actor::StartRoom {
@@ -248,8 +296,11 @@ impl ClientWs {
             ClientState::PreLogin => {
                 self.handle_message_login(ctx, id, mex);
             },
-            ClientState::MatchMaking | ClientState::PrePlaying(..) => {
+            ClientState::MatchMaking => {
                 self.handle_message_matchmaking(ctx, id, mex);
+            },
+            ClientState::Lobby | ClientState::PrePlaying(..) => {
+                self.handle_message_lobby(ctx, id, mex);
             },
             ClientState::Playing => {},
         }
@@ -275,6 +326,7 @@ impl Handler<server_actor::SendRelayMexRaw> for ClientWs {
         match &mut self.state {
             ClientState::PreLogin => {},
             ClientState::MatchMaking => {},
+            ClientState::Lobby => {},
             ClientState::PrePlaying(_) => {
                 if self.relay_queue.len() >= RELAY_QUEUE_MAX_SIZE {
                     eprintln!("Client {} not responding to event_room_start, queue full. kicking out", self.session_id);

@@ -12,16 +12,27 @@ pub type IdType = usize;
 
 // Common data
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerObject {
-    #[serde(skip_deserializing)]
     pub id: SerId,
     pub username: String,
+    #[serde(flatten)]
+    pub cosmetics: PlayerCosmetics,
+    pub is_host: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct LoginData {
+    pub username: String,
+    #[serde(flatten)]
+    pub cosmetics: PlayerCosmetics,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct PlayerCosmetics {
     pub avatar: u32,
     pub color: u64,
-    #[serde(skip_deserializing)]
-    pub is_host: bool,
 }
 
 // Client to Server data
@@ -35,7 +46,11 @@ pub struct IdMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReceivedMessage {
     Login {
-        details: PlayerObject
+        details: LoginData
+    },
+    ChangeAvatar {
+        #[serde(flatten)]
+        cosmetics: PlayerCosmetics,
     },
     RoomCreate {
     },
@@ -114,6 +129,11 @@ pub enum OutEvent {
         player: SerId,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_host: Option<SerId>,
+    },
+    EventPlayerAvatarChange {
+        player: SerId,
+        #[serde(flatten)]
+        cosmetics: PlayerCosmetics
     },
     #[serde(rename_all = "camelCase")]
     EventRoomStart {
