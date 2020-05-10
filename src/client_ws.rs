@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use actix::{Actor, Addr, AsyncContext, prelude::*, StreamHandler};
@@ -5,10 +6,9 @@ use actix_web::{Error, HttpRequest, HttpResponse, web};
 use actix_web_actors::ws;
 use serde::Serialize;
 
-use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse};
+use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutMessage, ReceivedGameMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse, OutGameMessage};
 use crate::protocol;
-use crate::server_actor::{self, Event, JoinRoomResult, SendRelayMexRaw, ServerActor};
-use std::net::SocketAddr;
+use crate::server_actor::{self, Event, JoinRoomResult, SendRelayMexRaw, ServerActor, GameEndAck};
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -17,6 +17,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const RELAY_QUEUE_MAX_SIZE: usize = 64usize;
 
+#[derive(PartialEq, Eq)]
 pub enum ClientState {
     PreLogin,// What's your name sir?
     MatchMaking,// Join or Create room (can also re-login to change name)
@@ -103,7 +104,16 @@ impl ClientWs {
             id, mex: inner
         };
 
-        let text = serde_json::to_string(&mex).expect("Error serializing message");
+        let mut writer = Vec::with_capacity(128);
+        if self.state == ClientState::Playing {
+            // Special message
+            writer.push(b'#');
+        }
+        serde_json::to_writer(&mut writer, &mex).expect("Error serializing message");
+
+        let text = unsafe {// It's safe? well it copies serde's method so I hope it is.
+            String::from_utf8_unchecked(writer)
+        };
         ctx.text(text);
         id
     }
@@ -306,6 +316,59 @@ impl ClientWs {
             ClientState::Playing => {},
         }
     }
+
+    pub fn handle_message_playing(&mut self, ctx: &mut <Self as Actor>::Context, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if text.chars().next() == Some('#') {
+            if text.len() < 2 {
+                return;
+            }
+            // Special message
+            let mex = match serde_json::from_str::<ReceivedGameMessage>(&text[1..]) {
+                Ok(x) => x,
+                Err(_) => {
+                    let err = protocol::Error::from("Invalid special Json".into(), None);
+                    self.send_message(ctx, &err);
+                    return;
+                },
+            };
+
+            match mex {
+                ReceivedGameMessage::EndGame {} => {
+                    self.db.send(server_actor::GameEndRequest {
+                        id: self.session_id,
+                    })
+                        .into_actor(self)
+                        .then(move |res, act, ctx| {
+                            let res = match res {
+                                Ok(Some(res)) => res,
+                                Ok(None) => return fut::ready(()),
+                                _ => {
+                                    // something is wrong with chat server
+                                    ctx.stop();
+                                    return fut::ready(());
+                                },
+                            };
+                            let mex = OutGameMessage::EndGameAck {
+                                players: res.0,
+                            };
+                            act.send_message(ctx, &mex);
+                            act.state = ClientState::Lobby;
+
+                            fut::ready(())
+                        })
+                        .wait(ctx);
+                },
+            };
+        } else {
+            self.db.do_send(server_actor::SendRelayMex {
+                sender_id: self.session_id,
+                data: text
+            });
+        }
+    }
 }
 
 impl Handler<server_actor::Event> for ClientWs {
@@ -380,10 +443,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientWs {
 
         match self.state {
             ClientState::Playing => {
-                self.db.do_send(server_actor::SendRelayMex {
-                    sender_id: self.session_id,
-                    data: text
-                });
+                self.handle_message_playing(ctx, text);
                 return;
             },
             _ => {}

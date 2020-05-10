@@ -117,16 +117,27 @@ pub struct SendRelayMexRaw {
     pub data: String,
 }
 
+#[derive(Message, Clone)]
+#[rtype(result = "Option<GameEndAck>")]
+pub struct GameEndRequest {
+    pub id: IdType,
+}
+
+pub struct GameEndAck(pub Vec<PlayerObject>);
+simple_result!(GameEndAck);
+
 
 struct UserData {
     addr: Addr<ClientWs>,
     obj: PlayerObject,
     room: Option<IdType>,
+    in_game: bool,
 }
 
 struct RoomData {
     state: RoomState,
     players: HashSet<IdType>,
+    in_game_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +201,7 @@ impl ServerActor {
         let room = RoomData {
             state: RoomState::Matchmaking,
             players: set,
+            in_game_count: 0,
         };
         self.rooms.insert(id, room);
 
@@ -198,15 +210,26 @@ impl ServerActor {
 
     /// Send event to all users in the room
     fn broadcast_event(&self, room: IdType, event: OutEvent, skip_id: Option<IdType>) {
-        if let Some(room) = self.rooms.get(&room) {
-            for id in room.players.iter() {
-                if Some(*id) == skip_id {
-                    continue;
-                }
-                if let Some(x) = self.players.get(&id) {
-                    let _ = x.addr.do_send(Event(event.clone()));// TODO: remove clone
-                }
+        match self.rooms.get(&room) {
+            Some(room) => self.broadcast_event_room(room, event, skip_id),
+            None => {},
+        };
+    }
+
+    fn broadcast_event_room(&self, room: &RoomData, event: OutEvent, skip_id: Option<IdType>) {
+        for id in room.players.iter() {
+            if Some(*id) == skip_id {
+                continue;
             }
+            let player = match self.players.get(&id) {
+                Some(x) => x,
+                None => continue,
+            };
+
+            if player.in_game {
+                continue; // Don't send if player is still in the game.
+            }
+            player.addr.do_send(Event(event.clone()));// TODO: remove clone
         }
     }
 
@@ -241,7 +264,11 @@ impl ServerActor {
                 new_host,
             };
 
-            self.broadcast_event(room_id, event, None);
+            // Why cant I convert a mutable reference to an immutable one? wtf
+            // let room = &*room;
+            let room = self.rooms.get(&room_id).unwrap();
+
+            self.broadcast_event_room(room, event, None);
         } else {
             self.rooms.remove(&room_id);
         }
@@ -272,6 +299,7 @@ impl Handler<RegisterSession> for ServerActor {
                     addr: msg.addr,
                     obj: pobj,
                     room: None,
+                    in_game: false,
                 })
             }
         }
@@ -332,7 +360,7 @@ impl Handler<JoinRoom> for ServerActor {
 
         let obj_data = obj.obj.clone();
         obj.room = Some(msg.room_id);
-        self.broadcast_event(msg.room_id, OutEvent::EventPlayerJoined {
+        self.broadcast_event_room(room, OutEvent::EventPlayerJoined {
             player: obj_data
         }, None);
 
@@ -402,11 +430,36 @@ impl Handler<StartRoom> for ServerActor {
                 broadcast_id: format!("{}", room_id)
             };
 
+            let room = if room.in_game_count > 0 {
+                // Kick players that are still in-game
+                let mut in_game_players = vec![];
+                for id in room.players.iter() {
+                    if let Some(x) = self.players.get_mut(&id) {
+                        if x.in_game {
+                            in_game_players.push(*id);
+                        }
+                    }
+                }
+
+                for id in in_game_players {
+                    self.leave_room_if_any(id);
+                }
+
+                match self.rooms.get_mut(&room_id) {
+                    None => return,
+                    Some(x) => x,
+                }
+            } else {
+                room
+            };
+
             for id in room.players.iter() {
-                if let Some(x) = self.players.get(&id) {
+                if let Some(x) = self.players.get_mut(&id) {
+                    x.in_game = true;
                     let _ = x.addr.do_send(Event(event.clone()));// TODO: remove clone
                 }
             }
+            room.in_game_count = room.players.len() as u32;
         }
     }
 }
@@ -426,17 +479,54 @@ impl Handler<SendRelayMex> for ServerActor {
         }
 
         let player = self.players.get(&msg.sender_id).expect("Expected player");
-        if let Some(room) = player.room.and_then(|room| self.rooms.get(&room)) {
-            let raw = format!("{{\"sender\":\"{}\",{}", SerId(msg.sender_id), &msg.data[1..]);
-            let raw_pkt = SendRelayMexRaw { data: raw };
-            for player in room.players.iter() {
-                if *player == msg.sender_id {
-                    continue;
-                }
-                if let Some(player) = self.players.get(&player) {
-                    player.addr.do_send(raw_pkt.clone())
-                }
+        let room = match player.room.and_then(|room| self.rooms.get(&room)) {
+            Some(x) => x,
+            None => return,
+        };
+
+        let raw = format!("{{\"sender\":\"{}\",{}", SerId(msg.sender_id), &msg.data[1..]);
+        let raw_pkt = SendRelayMexRaw { data: raw };
+        for player in room.players.iter() {
+            if *player == msg.sender_id {
+                continue;
+            }
+            let player = match self.players.get(&player) {
+                Some(x) => x,
+                None => continue,
+            };
+            if player.in_game {
+                player.addr.do_send(raw_pkt.clone())
             }
         }
     }
 }
+
+impl Handler<GameEndRequest> for ServerActor {
+    type Result = Option<GameEndAck>;
+
+    fn handle(&mut self, msg: GameEndRequest, _ctx: &mut Context<Self>) -> Self::Result {
+        let player = self.players.get_mut(&msg.id).expect("Invalid player");
+        let rooms = &mut self.rooms;
+        let room = match player.room.and_then(|x| rooms.get_mut(&x)) {
+            Some(x) => x,
+            None => return None,
+        };
+
+        if !player.in_game {
+            return None;
+        }
+
+        room.state = RoomState::Matchmaking;
+        player.in_game = false;
+        room.in_game_count -= 1;
+
+        let room = self.rooms.get(&player.room.unwrap()).unwrap();
+
+        let users = room.players.iter()
+            .map(|x| self.players.get(x).expect("Cannot find player").obj.clone())
+            .collect();
+
+        return Some(GameEndAck(users));
+    }
+}
+

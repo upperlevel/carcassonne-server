@@ -260,3 +260,19 @@ impl From<SerId> for IdType {
     }
 }
 
+
+/// --------------------- IN-GAME PROTOCOL ---------------------
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReceivedGameMessage {
+    EndGame {},
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutGameMessage {
+    EndGameAck {
+        players: Vec<PlayerObject>
+    },
+}
