@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse};
 use crate::protocol;
 use crate::server_actor::{self, Event, JoinRoomResult, SendRelayMexRaw, ServerActor};
+use std::net::SocketAddr;
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -26,6 +27,7 @@ pub enum ClientState {
 
 pub struct ClientWs {
     state: ClientState,
+    peer: Option<SocketAddr>,
     last_hb: Instant,
     session_id: IdType,
     next_send_id: u64,
@@ -34,9 +36,10 @@ pub struct ClientWs {
 }
 
 impl ClientWs {
-    pub fn new(db: Addr<ServerActor>) -> Self {
+    pub fn new(db: Addr<ServerActor>, peer: Option<SocketAddr>) -> Self {
         ClientWs {
             state: ClientState::PreLogin,
+            peer,
             last_hb: Instant::now(),
             session_id: 0,
             next_send_id: 0,
@@ -249,8 +252,6 @@ impl ClientWs {
     }
 
     pub fn handle_message_lobby(&mut self, ctx: &mut <Self as Actor>::Context, id: u64, mex: ReceivedMessage) {
-        self.send_message(ctx, &protocol::Error::from_origin(id, "Login Required".into(), None));
-
         match mex {
             ReceivedMessage::ChangeAvatar { cosmetics } => {
                 self.db.do_send(server_actor::EditCosmetics {
@@ -357,6 +358,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientWs {
             }
         };
 
+        //eprintln!("REC {:?} => {:?}", self.peer, msg);
+
         let text = match msg {
             ws::Message::Ping(msg) => {
                 self.last_hb = Instant::now();
@@ -422,5 +425,5 @@ pub async fn matchmaking_start(
     stream: web::Payload,
     data: web::Data<Addr<server_actor::ServerActor>>,
 ) -> Result<HttpResponse, Error> {
-    ws::start(ClientWs::new(data.get_ref().clone()), &req, stream)
+    ws::start(ClientWs::new(data.get_ref().clone(), req.peer_addr()), &req, stream)
 }
