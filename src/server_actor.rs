@@ -10,14 +10,14 @@
 //! Additional work is being done to decentralize this, replacing it with a
 //!
 
-use actix::prelude::*;
-use actix::dev::{MessageResponse, ResponseChannel};
-use rand::{self, rngs::ThreadRng, Rng};
 use std::collections::{HashMap, HashSet};
 
-use crate::protocol::{OutEvent, IdType, PlayerObject, RoomConnectionType, SerId, LoginData, PlayerCosmetics};
-use crate::client_ws::ClientWs;
+use actix::dev::{MessageResponse, ResponseChannel};
+use actix::prelude::*;
+use rand::{self, Rng, rngs::ThreadRng};
 
+use crate::client_ws::ClientWs;
+use crate::protocol::{IdType, LoginData, OutEvent, OutGameEvent, PlayerCosmetics, PlayerObject, RoomConnectionType, SerId};
 
 // Copied from actix, love the library but it seems a bit rushed in the "actor" part.
 // This should generate the code to share a result between actors.
@@ -41,6 +41,10 @@ macro_rules! simple_result {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct Event(pub OutEvent);
+
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct GameEvent(pub OutGameEvent);
 
 #[derive(Message)]
 #[rtype(IdType)]
@@ -246,6 +250,10 @@ impl ServerActor {
         let room = self.rooms.get_mut(&room_id).expect("Cannot find room");
         room.players.remove(&player_id);
 
+        if player.in_game {
+            room.in_game_count -= 1;
+        }
+
         let was_player_host = player.obj.is_host;
         player.room = None;
         player.obj.is_host = false;
@@ -259,16 +267,32 @@ impl ServerActor {
                 None
             };
 
+            // Why cant I convert a mutable reference to an immutable one? wtf
+            // let room = &*room;
+            //let room = self.rooms.get(&room_id).unwrap();
+
             let event = OutEvent::EventPlayerLeft {
                 player: player_id.into(),
                 new_host,
             };
 
-            // Why cant I convert a mutable reference to an immutable one? wtf
-            // let room = &*room;
-            let room = self.rooms.get(&room_id).unwrap();
+            let in_game_event = OutGameEvent::PlayerLeft {
+                player: player_id.into(),
+                new_host
+            };
 
-            self.broadcast_event_room(room, event, None);
+            for id in room.players.iter() {
+                let player = match self.players.get(&id) {
+                    Some(x) => x,
+                    None => continue,
+                };
+
+                if player.in_game {
+                    player.addr.do_send(GameEvent(in_game_event.clone()));
+                } else {
+                    player.addr.do_send(Event(event.clone()));// TODO: remove clone
+                }
+            }
         } else {
             self.rooms.remove(&room_id);
         }

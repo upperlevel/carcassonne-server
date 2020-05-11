@@ -125,6 +125,7 @@ pub enum OutEvent {
     EventPlayerJoined {
         player: PlayerObject,
     },
+    #[serde(rename_all = "camelCase")]
     EventPlayerLeft {
         player: SerId,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,5 +275,16 @@ pub enum ReceivedGameMessage {
 pub enum OutGameMessage {
     EndGameAck {
         players: Vec<PlayerObject>
+    },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutGameEvent {
+    #[serde(rename_all = "camelCase")]
+    PlayerLeft {
+        player: SerId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_host: Option<SerId>,
     },
 }

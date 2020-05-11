@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use actix::{Actor, Addr, AsyncContext, prelude::*, StreamHandler};
@@ -6,9 +5,9 @@ use actix_web::{Error, HttpRequest, HttpResponse, web};
 use actix_web_actors::ws;
 use serde::Serialize;
 
-use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutMessage, ReceivedGameMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse, OutGameMessage};
+use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutGameMessage, OutMessage, ReceivedGameMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse};
 use crate::protocol;
-use crate::server_actor::{self, Event, JoinRoomResult, SendRelayMexRaw, ServerActor, GameEndAck};
+use crate::server_actor::{self, Event, GameEvent, JoinRoomResult, SendRelayMexRaw, ServerActor};
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -28,7 +27,6 @@ pub enum ClientState {
 
 pub struct ClientWs {
     state: ClientState,
-    peer: Option<SocketAddr>,
     last_hb: Instant,
     session_id: IdType,
     next_send_id: u64,
@@ -37,10 +35,9 @@ pub struct ClientWs {
 }
 
 impl ClientWs {
-    pub fn new(db: Addr<ServerActor>, peer: Option<SocketAddr>) -> Self {
+    pub fn new(db: Addr<ServerActor>) -> Self {
         ClientWs {
             state: ClientState::PreLogin,
-            peer,
             last_hb: Instant::now(),
             session_id: 0,
             next_send_id: 0,
@@ -371,7 +368,7 @@ impl ClientWs {
     }
 }
 
-impl Handler<server_actor::Event> for ClientWs {
+impl Handler<Event> for ClientWs {
     type Result = ();
 
     fn handle(&mut self, msg: Event, ctx: &mut <Self as Actor>::Context) -> Self::Result {
@@ -380,6 +377,14 @@ impl Handler<server_actor::Event> for ClientWs {
         if let OutEvent::EventRoomStart { .. } = msg.0 {
             self.state = ClientState::PrePlaying(id);
         }
+    }
+}
+
+impl Handler<GameEvent> for ClientWs {
+    type Result = ();
+
+    fn handle(&mut self, msg: GameEvent, ctx: &mut <Self as Actor>::Context) -> Self::Result {
+        self.send_message(ctx, &msg.0);
     }
 }
 
@@ -485,5 +490,5 @@ pub async fn matchmaking_start(
     stream: web::Payload,
     data: web::Data<Addr<server_actor::ServerActor>>,
 ) -> Result<HttpResponse, Error> {
-    ws::start(ClientWs::new(data.get_ref().clone(), req.peer_addr()), &req, stream)
+    ws::start(ClientWs::new(data.get_ref().clone()), &req, stream)
 }
