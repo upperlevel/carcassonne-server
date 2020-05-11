@@ -24,13 +24,17 @@ async fn main() -> std::io::Result<()> {
 
     let room_db = server_actor::ServerActor::default().start();
 
+    let bind_addr = std::env::var("BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+
+    println!("Starting server on {}", bind_addr);
     HttpServer::new(move || {
         App::new()
             .data(room_db.clone())
             .configure(api_service::config)
             .route("/", web::get().to(index))
     })
-        .bind("0.0.0.0:8080")?
+        .bind(bind_addr)?
         .run()
         .await
 }
