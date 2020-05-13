@@ -4,18 +4,13 @@ static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 
 use actix::prelude::*;
-use actix_web::{HttpServer, App, Responder, HttpResponse, web};
+use actix_web::{HttpServer, App, web};
 use env_logger;
 
 
-mod api_service;
 mod client_ws;
 mod protocol;
 mod server_actor;
-
-async fn index() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
-}
 
 
 #[actix_rt::main]
@@ -31,8 +26,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .data(room_db.clone())
-            .configure(api_service::config)
-            .route("/", web::get().to(index))
+            .route("/", web::get().to(client_ws::matchmaking_start))
     })
         .bind(bind_addr)?
         .run()
