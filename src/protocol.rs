@@ -52,6 +52,8 @@ pub enum ReceivedMessage {
         #[serde(flatten)]
         cosmetics: PlayerCosmetics,
     },
+    RoomFind {  
+    },
     RoomCreate {
     },
     RoomLeave {
@@ -64,7 +66,6 @@ pub enum ReceivedMessage {
     RoomStart {
         connection_type: RoomConnectionType,
     },
-
     #[serde(rename_all = "camelCase")]
     EventRoomStartAck {
         request_id: u64,
@@ -147,6 +148,14 @@ pub enum OutEvent {
 #[serde(rename_all = "camelCase")]
 pub struct LoginResponse {
     pub player_id: SerId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomFindResponse {
+    pub players: Vec<PlayerObject>,
+    pub room_id: SerId,
+    pub just_created: bool
 }
 
 #[derive(Serialize)]

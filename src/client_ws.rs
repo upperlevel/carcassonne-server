@@ -5,9 +5,9 @@ use actix_web::{Error, HttpRequest, HttpResponse, web};
 use actix_web_actors::ws;
 use serde::Serialize;
 
-use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutGameMessage, OutMessage, ReceivedGameMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse};
+use crate::protocol::{IdMessage, IdType, LoginResponse, NoData, OutEvent, OutGameMessage, OutMessage, ReceivedGameMessage, ReceivedMessage, Response, RoomCreateResponse, RoomJoinResponse, RoomFindResponse};
 use crate::protocol;
-use crate::server_actor::{self, Event, GameEvent, JoinRoomResult, SendRelayMexRaw, ServerActor};
+use crate::server_actor::{self, Event, GameEvent, JoinRoomResult, FindRoomResult, SendRelayMexRaw, ServerActor};
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -176,7 +176,48 @@ impl ClientWs {
                         fut::ready(())
                     })
                     .wait(ctx);
-            }
+            },
+            ReceivedMessage::RoomFind {} => {
+                self.db.send(server_actor::FindRoom {
+                    id: self.session_id
+                })
+                    .into_actor(self)
+                    .then(move |res, act, ctx| {
+                        let res = match res {
+                            Ok(res) => res,
+                            _ => {
+                                ctx.stop();
+                                return fut::ready(());
+                            }
+                        };
+
+                        let pkt_type = "room_find_response".into();
+                        match res {
+                            FindRoomResult::Success { players, room_id, just_created } => {
+                                let pkt = Response::ok(
+                                    id, pkt_type,
+                                    RoomFindResponse {
+                                        players,
+                                        room_id: room_id.into(),
+                                        just_created
+                                    }
+                                );
+                                act.send_message(ctx, &pkt);
+                                act.state = ClientState::Lobby;
+                            },
+                            FindRoomResult::GameIsFull => {
+                                // TODO
+                                let pkt = Response::from(
+                                    id, pkt_type,
+                                    Some("game_is_full".into()), NoData {}
+                                );
+                                act.send_message(ctx, &pkt);
+                            }
+                        }
+                        fut::ready(())
+                    })
+                    .wait(ctx)
+            },
             ReceivedMessage::RoomCreate {} => {
                 self.db.send(server_actor::CreateRoom {
                     id: self.session_id
@@ -232,12 +273,6 @@ impl ClientWs {
                             JoinRoomResult::RoomNotFound => {
                                 let pkt = Response::from(
                                     id, ptype, Some("room_not_found".into()), NoData {}
-                                );
-                                act.send_message(ctx, &pkt);
-                            },
-                            JoinRoomResult::NameConflict => {
-                                let pkt = Response::from(
-                                    id, ptype, Some("name_conflict".into()), NoData {}
                                 );
                                 act.send_message(ctx, &pkt);
                             },

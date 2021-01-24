@@ -20,7 +20,7 @@ async fn main() -> std::io::Result<()> {
     let room_db = server_actor::ServerActor::default().start();
 
     let bind_addr = std::env::var("BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        .unwrap_or_else(|_| "0.0.0.0:8081".to_string());
 
     println!("Starting server on {}", bind_addr);
     HttpServer::new(move || {

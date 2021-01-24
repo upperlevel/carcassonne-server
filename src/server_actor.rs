@@ -10,7 +10,7 @@
 //! Additional work is being done to decentralize this, replacing it with a
 //!
 
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}};
 
 use actix::dev::{MessageResponse, ResponseChannel};
 use actix::prelude::*;
@@ -67,6 +67,27 @@ pub struct EditCosmetics {
     pub obj: PlayerCosmetics,
 }
 
+// ----------------------------------------------------------------
+
+#[derive(Message)]
+#[rtype(FindRoomResult)]
+pub struct FindRoom {
+    pub id: IdType
+}
+
+pub enum FindRoomResult {
+    Success {
+        room_id: IdType, 
+        players: Vec<PlayerObject>,
+        just_created: bool
+    }, 
+    GameIsFull,
+}
+
+simple_result!(FindRoomResult);
+
+// ----------------------------------------------------------------
+
 #[derive(Message)]
 #[rtype(CreateRoomResult)]
 pub struct CreateRoom {
@@ -90,7 +111,6 @@ pub struct JoinRoom {
 pub enum JoinRoomResult {
     Success(Vec<PlayerObject>),
     RoomNotFound,
-    NameConflict,
     AlreadyPlaying,
 }
 simple_result!(JoinRoomResult);
@@ -154,6 +174,7 @@ pub enum RoomState {
 pub struct ServerActor {
     players: HashMap<IdType, UserData>,
     rooms: HashMap<IdType, RoomData>,
+    available_rooms: HashSet<IdType>,
     rng: ThreadRng,
 }
 
@@ -162,6 +183,7 @@ impl Default for ServerActor {
         ServerActor {
             players: HashMap::new(),
             rooms: HashMap::new(),
+            available_rooms: HashSet::new(),
             rng: rand::thread_rng(),
         }
     }
@@ -189,7 +211,7 @@ impl ServerActor {
         id
     }
 
-    fn allocate_room_id(&mut self, host: IdType) -> IdType {
+    fn create_room(&mut self, host_id: IdType, public: bool) -> IdType {
         let mut id;
 
         loop {
@@ -200,16 +222,52 @@ impl ServerActor {
             }
         }
 
-        let mut set = HashSet::new();
-        set.insert(host);
+        let mut players = HashSet::new();
+        players.insert(host_id);
         let room = RoomData {
             state: RoomState::Matchmaking,
-            players: set,
+            players,
             in_game_count: 0,
         };
         self.rooms.insert(id, room);
 
+        let host = self.players.get_mut(&host_id).unwrap();
+        host.obj.is_host = true;
+        host.room = Some(id);
+
+        if public {
+            self.available_rooms.insert(id);
+        }
+
         id
+    }
+
+    fn remove_room(&mut self, room_id: IdType) {
+        self.rooms.remove(&room_id);
+        self.available_rooms.remove(&room_id);
+
+        //println!("room removed (id={}) because it's empty", room_id);
+    }
+
+    fn join_room(&mut self, player_id: IdType, room_id: IdType) -> bool {
+        self.leave_room_if_any(player_id); // If the player was already inside a room, makes him quit.
+
+        self.rooms.get_mut(&room_id).unwrap().players.insert(player_id); // Adds the player to the target room.
+
+        let room_data = self.rooms.get(&room_id).expect("Cannot find room");
+        if room_data.state != RoomState::Matchmaking { // The room isn't in the correct state, it can't be joined.
+            return false;
+        }
+
+        let user_data = self.players.get_mut(&player_id).expect("Cannot find player");
+        user_data.room = Some(room_id); // Saves that the player is connected to this room.
+
+        let player_obj = user_data.obj.clone();
+        self.broadcast_event_room(&room_data, OutEvent::EventPlayerJoined { // Finally broadcasts that the player joined to all players in the room.
+            player: player_obj
+        }, None);
+
+        true
     }
 
     /// Send event to all users in the room
@@ -294,7 +352,32 @@ impl ServerActor {
                 }
             }
         } else {
-            self.rooms.remove(&room_id);
+            self.remove_room(room_id);
+        }
+    }
+
+    fn find_available_room_for(&mut self, player_id: IdType, find_if: impl Fn(IdType, &RoomData) -> bool, max_iter: i32) -> Option<IdType> {
+        let mut found = false;
+        let mut found_room_id = 0;
+
+        let mut iter = 0;
+        for room_id in &self.available_rooms {
+            if max_iter > 0 && iter >= max_iter {
+                break;
+            }
+            let room_data = self.rooms.get(&room_id).unwrap();
+            if find_if(*room_id, room_data) {
+                found = true;
+                found_room_id = *room_id;
+            }
+            iter += 1;
+        }
+
+        if found {
+            self.rooms.get_mut(&found_room_id).unwrap().players.insert(player_id);
+            Some(found_room_id)
+        } else {
+            None
         }
     }
 }
@@ -340,15 +423,51 @@ impl Handler<Disconnect> for ServerActor {
     }
 }
 
+impl Handler<FindRoom> for ServerActor {
+    type Result = FindRoomResult;
+
+    fn handle(&mut self, msg: FindRoom, _: &mut Context<Self>) -> Self::Result {
+        let my_id = msg.id;
+
+        let mut just_created = false;
+
+        let room_id = self.find_available_room_for(
+            my_id, 
+            |_, _| { true }, 
+            -1
+        );
+
+        let room_id = match room_id {
+            Some(room_id) => {
+                self.join_room(my_id, room_id);
+                room_id
+            },
+            None => {
+                just_created = true;
+                self.create_room(my_id, true)
+            }
+        };
+
+        FindRoomResult::Success {
+            room_id,
+            players: self.rooms.get(&room_id)
+                .unwrap()
+                .players
+                .iter()
+                .map(|x| self.players.get(x).expect("Cannot find player").obj.clone())
+                .collect(),
+            just_created
+        }
+    }
+}
+
 impl Handler<CreateRoom> for ServerActor {
     type Result = CreateRoomResult;
 
     fn handle(&mut self, msg: CreateRoom, _: &mut Context<Self>) -> Self::Result {
         self.leave_room_if_any(msg.id);
-        let room_id = self.allocate_room_id(msg.id);
+        let room_id = self.create_room(msg.id, false);
         let player = self.players.get_mut(&msg.id).expect("Cannot find player");
-        player.room = Some(room_id);
-        player.obj.is_host = true;
         CreateRoomResult {
             room_id,
             player: player.obj.clone()
@@ -360,35 +479,18 @@ impl Handler<JoinRoom> for ServerActor {
     type Result = JoinRoomResult;
 
     fn handle(&mut self, msg: JoinRoom, _: &mut Context<Self>) -> Self::Result {
-        self.leave_room_if_any(msg.id);
 
-        let room = match self.rooms.get(&msg.room_id) {
-            Some(x) => x,
-            None => return JoinRoomResult::RoomNotFound,
-        };
+        let player_id = msg.id;
+        let room_id = msg.room_id;
 
-        if room.state != RoomState::Matchmaking {
+        if !self.rooms.contains_key(&room_id) {
+            return JoinRoomResult::RoomNotFound;
+        }
+
+        let result = self.join_room(player_id, room_id);
+        if !result {
             return JoinRoomResult::AlreadyPlaying;
         }
-
-        let username = self.players.get(&msg.id).expect("Cannot find player").obj.username.as_str();
-
-        let name_conflict = room.players.iter().any(|x| {
-            self.players.get(x).expect("Cannot find player").obj.username == username
-        });
-
-        if name_conflict {
-            return JoinRoomResult::NameConflict;
-        }
-        let obj = self.players.get_mut(&msg.id).expect("Cannot find player");
-
-        let obj_data = obj.obj.clone();
-        obj.room = Some(msg.room_id);
-        self.broadcast_event_room(room, OutEvent::EventPlayerJoined {
-            player: obj_data
-        }, None);
-
-        self.rooms.get_mut(&msg.room_id).expect("Cannot find room").players.insert(msg.id);
 
         let users = self.rooms.get(&msg.room_id)
             .unwrap()
@@ -443,6 +545,9 @@ impl Handler<StartRoom> for ServerActor {
         };
 
         if let Some(room) = self.rooms.get_mut(&room_id) {
+
+            self.available_rooms.remove(&room_id);
+
             if room.state != RoomState::Matchmaking || room.players.len() < 2 {
                 return
             }
