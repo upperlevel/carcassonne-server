@@ -10,7 +10,7 @@
 //! Additional work is being done to decentralize this, replacing it with a
 //!
 
-use std::{collections::{HashMap, HashSet}};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, iter::Successors, ops::DerefMut, time::Duration};
 
 use actix::dev::{MessageResponse, ResponseChannel};
 use actix::prelude::*;
@@ -37,6 +37,9 @@ macro_rules! simple_result {
     };
 }
 
+const MAX_PLAYERS_PER_ROOM: usize = 5;
+const MIN_PLAYERS_PER_ROOM: usize = 3;
+const ROOM_COUNTDOWN_ON_MIN_PLAYERS: u64 = 10;
 
 #[derive(Message)]
 #[rtype(result = "()")]
@@ -111,6 +114,7 @@ pub struct JoinRoom {
 pub enum JoinRoomResult {
     Success(Vec<PlayerObject>),
     RoomNotFound,
+    RoomIsFull,
     AlreadyPlaying,
 }
 simple_result!(JoinRoomResult);
@@ -162,6 +166,19 @@ struct RoomData {
     state: RoomState,
     players: HashSet<IdType>,
     in_game_count: u32,
+
+    start_countdown_handle: Option<SpawnHandle>
+}
+
+impl RoomData {
+    pub fn cancel_start_countdown(&mut self, ctx: &mut Context<ServerActor>) -> bool {
+        if let Some(handle) = self.start_countdown_handle {
+            ctx.cancel_future(handle);
+            self.start_countdown_handle = None;
+            return true;
+        }
+        return false;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +190,9 @@ pub enum RoomState {
 
 pub struct ServerActor {
     players: HashMap<IdType, UserData>,
-    rooms: HashMap<IdType, RoomData>,
-    available_rooms: HashSet<IdType>,
+    rooms: HashMap<IdType, RoomData>,     // The full list of the rooms.
+    pub_rooms: HashSet<IdType>,           // Public rooms created for players that wants to play alone.
+    pub_rooms_available: HashSet<IdType>, // Rooms that are not full.
     rng: ThreadRng,
 }
 
@@ -183,7 +201,8 @@ impl Default for ServerActor {
         ServerActor {
             players: HashMap::new(),
             rooms: HashMap::new(),
-            available_rooms: HashSet::new(),
+            pub_rooms: HashSet::new(),
+            pub_rooms_available: HashSet::new(),
             rng: rand::thread_rng(),
         }
     }
@@ -228,6 +247,7 @@ impl ServerActor {
             state: RoomState::Matchmaking,
             players,
             in_game_count: 0,
+            start_countdown_handle: None
         };
         self.rooms.insert(id, room);
 
@@ -236,7 +256,8 @@ impl ServerActor {
         host.room = Some(id);
 
         if public {
-            self.available_rooms.insert(id);
+            self.pub_rooms.insert(id);
+            self.pub_rooms_available.insert(id); // As soon as it is created, the pub room is available.
         }
 
         id
@@ -244,46 +265,23 @@ impl ServerActor {
 
     fn remove_room(&mut self, room_id: IdType) {
         self.rooms.remove(&room_id);
-        self.available_rooms.remove(&room_id);
+        self.pub_rooms.remove(&room_id);
+        self.pub_rooms_available.remove(&room_id);
 
         //println!("room removed (id={}) because it's empty", room_id);
     }
 
-    fn join_room(&mut self, player_id: IdType, room_id: IdType) -> bool {
-        self.leave_room_if_any(player_id); // If the player was already inside a room, makes him quit.
-
-        self.rooms.get_mut(&room_id).unwrap().players.insert(player_id); // Adds the player to the target room.
-
-        let room_data = self.rooms.get(&room_id).expect("Cannot find room");
-        if room_data.state != RoomState::Matchmaking { // The room isn't in the correct state, it can't be joined.
-            return false;
-        }
-
-        let user_data = self.players.get_mut(&player_id).expect("Cannot find player");
-        user_data.room = Some(room_id); // Saves that the player is connected to this room.
-
-        let player_obj = user_data.obj.clone();
-        self.broadcast_event_room(&room_data, OutEvent::EventPlayerJoined { // Finally broadcasts that the player joined to all players in the room.
-            player: player_obj
-        }, None);
-
-        true
-    }
-
     /// Send event to all users in the room
-    fn broadcast_event(&self, room: IdType, event: OutEvent, skip_id: Option<IdType>) {
-        match self.rooms.get(&room) {
-            Some(room) => self.broadcast_event_room(room, event, skip_id),
-            None => {},
-        };
+    fn broadcast_event(room: &RoomData, players_by_id: &HashMap<IdType, UserData>, event: OutEvent, skip_id: Option<IdType>) {
+        ServerActor::broadcast_event_room(room, players_by_id, event, skip_id);
     }
 
-    fn broadcast_event_room(&self, room: &RoomData, event: OutEvent, skip_id: Option<IdType>) {
-        for id in room.players.iter() {
+    fn broadcast_event_room(room_data: &RoomData, players_by_id: &HashMap<IdType, UserData>, event: OutEvent, skip_id: Option<IdType>) {
+        for id in room_data.players.iter() {
             if Some(*id) == skip_id {
                 continue;
             }
-            let player = match self.players.get(&id) {
+            let player = match players_by_id.get(&id) {
                 Some(x) => x,
                 None => continue,
             };
@@ -295,7 +293,8 @@ impl ServerActor {
         }
     }
 
-    fn leave_room_if_any(&mut self, player_id: IdType) {
+    fn leave_room_if_any(&mut self, ctx: &mut Context<Self>, player_id: IdType) {
+
         let player = match self.players.get_mut(&player_id) {
             Some(x) => x,
             None => return,
@@ -307,6 +306,17 @@ impl ServerActor {
 
         let room = self.rooms.get_mut(&room_id).expect("Cannot find room");
         room.players.remove(&player_id);
+
+        if room.players.len() < MIN_PLAYERS_PER_ROOM { // If the players count becomes lower than the min number of players stops the countdown.
+            if room.cancel_start_countdown(ctx) {
+                println!("[LeaveRoom] Room {}'s countdown has been canceled because a player quit.", room_id);
+            }
+        }
+
+        // If the room is public and a player's quit and the number of players is less than the max, the room is available.
+        if self.pub_rooms.contains(&room_id) && room.players.len() < MAX_PLAYERS_PER_ROOM {
+            self.pub_rooms_available.insert(room_id);
+        }
 
         if player.in_game {
             room.in_game_count -= 1;
@@ -353,6 +363,7 @@ impl ServerActor {
             }
         } else {
             self.remove_room(room_id);
+            println!("[LeaveRoom] Room {} has been deleted since all players quit.", room_id);
         }
     }
 
@@ -361,7 +372,7 @@ impl ServerActor {
         let mut found_room_id = 0;
 
         let mut iter = 0;
-        for room_id in &self.available_rooms {
+        for room_id in &self.pub_rooms_available {
             if max_iter > 0 && iter >= max_iter {
                 break;
             }
@@ -417,8 +428,8 @@ impl Handler<RegisterSession> for ServerActor {
 impl Handler<Disconnect> for ServerActor {
     type Result = ();
 
-    fn handle(&mut self, msg: Disconnect, _: &mut Context<Self>) -> Self::Result {
-        self.leave_room_if_any(msg.id);
+    fn handle(&mut self, msg: Disconnect, ctx: &mut Context<Self>) -> Self::Result {
+        self.leave_room_if_any(ctx, msg.id);
         self.players.remove(&msg.id);
     }
 }
@@ -426,7 +437,7 @@ impl Handler<Disconnect> for ServerActor {
 impl Handler<FindRoom> for ServerActor {
     type Result = FindRoomResult;
 
-    fn handle(&mut self, msg: FindRoom, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: FindRoom, ctx: &mut Context<Self>) -> Self::Result {
         let my_id = msg.id;
 
         let mut just_created = false;
@@ -439,7 +450,7 @@ impl Handler<FindRoom> for ServerActor {
 
         let room_id = match room_id {
             Some(room_id) => {
-                self.join_room(my_id, room_id);
+                ctx.notify(JoinRoom { id: my_id, room_id });
                 room_id
             },
             None => {
@@ -447,6 +458,8 @@ impl Handler<FindRoom> for ServerActor {
                 self.create_room(my_id, true)
             }
         };
+        
+        println!("[FindRoom] Room {} found for player {}.", room_id, my_id);
 
         FindRoomResult::Success {
             room_id,
@@ -464,8 +477,8 @@ impl Handler<FindRoom> for ServerActor {
 impl Handler<CreateRoom> for ServerActor {
     type Result = CreateRoomResult;
 
-    fn handle(&mut self, msg: CreateRoom, _: &mut Context<Self>) -> Self::Result {
-        self.leave_room_if_any(msg.id);
+    fn handle(&mut self, msg: CreateRoom, ctx: &mut Context<Self>) -> Self::Result {
+        self.leave_room_if_any(ctx, msg.id);
         let room_id = self.create_room(msg.id, false);
         let player = self.players.get_mut(&msg.id).expect("Cannot find player");
         CreateRoomResult {
@@ -478,27 +491,61 @@ impl Handler<CreateRoom> for ServerActor {
 impl Handler<JoinRoom> for ServerActor {
     type Result = JoinRoomResult;
 
-    fn handle(&mut self, msg: JoinRoom, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: JoinRoom, ctx: &mut Context<Self>) -> Self::Result {
 
-        let player_id = msg.id;
+        let my_id = msg.id;
         let room_id = msg.room_id;
 
-        if !self.rooms.contains_key(&room_id) {
-            return JoinRoomResult::RoomNotFound;
-        }
+        self.leave_room_if_any(ctx, my_id);
 
-        let result = self.join_room(player_id, room_id);
-        if !result {
+        let players_by_id = &mut self.players;
+
+        let room_data = match self.rooms.get_mut(&room_id) {
+            Some(room_data) => room_data,
+            None => return JoinRoomResult::RoomNotFound
+        };
+
+        if room_data.state != RoomState::Matchmaking {
             return JoinRoomResult::AlreadyPlaying;
         }
 
-        let users = self.rooms.get(&msg.room_id)
-            .unwrap()
-            .players
-            .iter()
-            .map(|x| self.players.get(x).expect("Cannot find player").obj.clone())
-            .collect();
-        JoinRoomResult::Success(users)
+        if room_data.players.len() >= MAX_PLAYERS_PER_ROOM {
+            return JoinRoomResult::RoomIsFull;
+        }
+
+        room_data.players.insert(my_id);
+        
+        let user_data = players_by_id.get_mut(&my_id).unwrap();
+        user_data.room = Some(room_id);
+
+        let player = user_data.obj.clone();
+        ServerActor::broadcast_event_room(
+            &room_data, 
+            players_by_id, 
+            OutEvent::EventPlayerJoined { player }, 
+            None
+        );
+        
+        println!("[JoinRoom] Room {} joined by the player {}.", room_id, my_id);
+        
+        if room_data.players.len() == MIN_PLAYERS_PER_ROOM {
+            let spawn_handle = ctx.notify_later(StartRoom {
+                id: my_id,
+                conn_type: RoomConnectionType::ServerBroadcast
+            }, Duration::from_secs(ROOM_COUNTDOWN_ON_MIN_PLAYERS));
+            room_data.start_countdown_handle = Some(spawn_handle);
+
+            println!("[JoinRoom] Room {} has reached the min players ({}), it's going to start in {} seconds.", room_id, MIN_PLAYERS_PER_ROOM, ROOM_COUNTDOWN_ON_MIN_PLAYERS);
+        }
+
+        // If the max players are reached the room isn't available anymore (applies only if public).
+        if room_data.players.len() == MAX_PLAYERS_PER_ROOM /*&& self.pub_rooms.contains(&room_id)*/ {
+            self.pub_rooms_available.remove(&room_id);
+        }
+
+        JoinRoomResult::Success(
+            room_data.players.iter().map(|id| players_by_id.get(id).unwrap().obj.clone()).collect()
+        )
     }
 }
 
@@ -520,7 +567,7 @@ impl Handler<EditCosmetics> for ServerActor {
 
         let id = player.obj.id;
 
-        self.broadcast_event(room, OutEvent::EventPlayerAvatarChange {
+        ServerActor::broadcast_event(self.rooms.get(&room).unwrap(), &self.players, OutEvent::EventPlayerAvatarChange {
             player: id.into(),
             cosmetics: msg.obj,
         }, Some(msg.id));
@@ -530,23 +577,32 @@ impl Handler<EditCosmetics> for ServerActor {
 impl Handler<LeaveRoom> for ServerActor {
     type Result = ();
 
-    fn handle(&mut self, msg: LeaveRoom, _: &mut Context<Self>) -> Self::Result {
-        self.leave_room_if_any(msg.id);
+    fn handle(&mut self, msg: LeaveRoom, ctx: &mut Context<Self>) -> Self::Result {
+        self.leave_room_if_any(ctx, msg.id);
     }
 }
 
 impl Handler<StartRoom> for ServerActor {
     type Result = ();
 
-    fn handle(&mut self, msg: StartRoom, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: StartRoom, ctx: &mut Context<Self>) -> Self::Result {
+
         let room_id = match self.players.get(&msg.id).and_then(|x| x.room) {
             Some(x) => x,
             None => return,
         };
 
+        println!("[StartRoom] Room {} is starting.", room_id);
+
         if let Some(room) = self.rooms.get_mut(&room_id) {
 
-            self.available_rooms.remove(&room_id);
+            // Ensures that there wasn't any "lobby" countdown running.
+            room.cancel_start_countdown(ctx);
+
+            // Removes the room from the pub rooms available since it has started (shouldn't be applied to private rooms).
+            //if self.pub_rooms.contains(&room_id) {
+                self.pub_rooms_available.remove(&room_id);
+            //}
 
             if room.state != RoomState::Matchmaking || room.players.len() < 2 {
                 return
@@ -571,7 +627,7 @@ impl Handler<StartRoom> for ServerActor {
                 }
 
                 for id in in_game_players {
-                    self.leave_room_if_any(id);
+                    self.leave_room_if_any(ctx, id);
                 }
 
                 match self.rooms.get_mut(&room_id) {

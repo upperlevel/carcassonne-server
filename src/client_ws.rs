@@ -173,6 +173,7 @@ impl ClientWs {
                             }
                         );
                         act.send_message(ctx, &res);
+
                         fut::ready(())
                     })
                     .wait(ctx);
@@ -282,6 +283,12 @@ impl ClientWs {
                                 );
                                 act.send_message(ctx, &pkt);
                             },
+                            JoinRoomResult::RoomIsFull => {
+                                let pkt = Response::from(
+                                    id, ptype, Some("room_is_full".into()), NoData {}
+                                );
+                                act.send_message(ctx, &pkt);
+                            }
                         }
                         fut::ready(())
                     })
