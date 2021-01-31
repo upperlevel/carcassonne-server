@@ -1,7 +1,7 @@
 [package]
 name = "carcassonne-server"
 version = "0.1.0"
-authors = ["Rossi Lorenzo <snowycoder@gmail.com>"]
+authors = ["Rossi Lorenzo <snowycoder@gmail.com>", "Rutayisire Lorenzo <lorenzorutayisire@gmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
