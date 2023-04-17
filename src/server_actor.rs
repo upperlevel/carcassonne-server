@@ -37,9 +37,9 @@ macro_rules! simple_result {
     };
 }
 
-const MAX_PLAYERS_PER_ROOM: usize = 5;
+const MAX_PLAYERS_PER_ROOM: usize = 8;
 const MIN_PLAYERS_PER_ROOM: usize = 3;
-const ROOM_COUNTDOWN_ON_MIN_PLAYERS: u64 = 10;
+const ROOM_COUNTDOWN_ON_MIN_PLAYERS: u64 = 30;
 
 #[derive(Message)]
 #[rtype(result = "()")]
